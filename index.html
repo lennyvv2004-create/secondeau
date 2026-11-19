@@ -130,6 +130,8 @@
   .mfoot{display:flex;gap:8px;margin-top:18px;align-items:center}
   .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .imgrow{display:flex;gap:10px;align-items:center}.imgrow img{height:70px;border-radius:8px}
+  .pf{display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:13px;text-align:left;padding:4px 0;border-bottom:1px solid var(--line)}
+  .dcat{font-size:12px;padding:3px 6px}
   .hint{font-size:12px;color:var(--mute);margin-top:8px}
 </style>
 </head>
@@ -177,8 +179,10 @@
     <div class="upgrid">
       <div id="uploadBox" class="drop">
         <input type="file" id="docFile" multiple hidden>
-        <button class="primary" id="docPick">⬆ Déposer des fichiers</button>
+        <button id="docPick">📎 Choisir des fichiers</button>
         <div class="mute">ou glisse-les ici · 50 Mo max par fichier (PDF, Word, Excel, PowerPoint, images, vidéos…)</div>
+        <div id="pending"></div>
+        <button class="primary" id="docSend" disabled>⬆ Déposer</button>
       </div>
       <div class="linkbox">
         <input id="lnkName" placeholder="Nom du lien (ex : Rapport Word partagé)">
@@ -525,11 +529,13 @@ function initDocs(){
   $("docCat").innerHTML=DOC_CATS.map(c=>`<option>${c}</option>`).join("");
   if(!ASSETS){$("docPick").disabled=true;$("uploadBox").querySelector(".mute").textContent="Le dépôt de fichiers n'est pas disponible pour ton accès : ajoute plutôt un lien.";}
   $("docPick").onclick=()=>$("docFile").click();
-  $("docFile").onchange=e=>{uploadFiles([...e.target.files]);e.target.value=""};
+  $("docFile").onchange=e=>{addPending([...e.target.files]);e.target.value=""};
+  $("docSend").onclick=async()=>{const fs=pendingFiles;pendingFiles=[];renderPending();$("docSend").disabled=true;await uploadFiles(fs)};
+  $("docCat").onchange=renderPending;
   const box=$("uploadBox");
   box.addEventListener("dragover",e=>{e.preventDefault();box.classList.add("over")});
   box.addEventListener("dragleave",()=>box.classList.remove("over"));
-  box.addEventListener("drop",e=>{e.preventDefault();box.classList.remove("over");if(ASSETS)uploadFiles([...e.dataTransfer.files])});
+  box.addEventListener("drop",e=>{e.preventDefault();box.classList.remove("over");if(ASSETS)addPending([...e.dataTransfer.files])});
   $("lnkAdd").onclick=async()=>{const u=$("lnkUrl").value.trim(),n=$("lnkName").value.trim();
     if(!/^https?:\/\//i.test(u)){$("upStatus").textContent="Le lien doit commencer par https://";return}
     try{await DB.collection("docs").add({name:n||u,kind:"link",url:u,cat:$("docCat").value,by:UID,at:Date.now()});$("lnkUrl").value=$("lnkName").value="";$("upStatus").textContent="✔ Lien ajouté"}catch(e){writeErr(e)}};
@@ -538,6 +544,11 @@ function initDocs(){
   DB.collection("docs").onSnapshot(s=>{clearTimeout(to);docs=s.docs.map(d=>({id:d.id,...d.data()}));renderDocs()},()=>{clearTimeout(to);$("docList").innerHTML='<div class="empty">Documents inaccessibles pour le moment.</div>'});
   renderDocs();
 }
+let pendingFiles=[];
+function addPending(fs){pendingFiles.push(...fs);renderPending()}
+function renderPending(){$("pending").innerHTML=pendingFiles.map((f,i)=>`<div class="pf"><span>📄 ${H(f.name)}</span><span class="mute">${size(f.size)}</span><button class="ghost" data-i="${i}">✕</button></div>`).join("");
+  $("pending").querySelectorAll("button").forEach(b=>b.onclick=()=>{pendingFiles.splice(+b.dataset.i,1);renderPending()});
+  $("docSend").disabled=!pendingFiles.length;$("docSend").textContent=pendingFiles.length?`⬆ Déposer ${pendingFiles.length} fichier${pendingFiles.length>1?"s":""} dans « ${$("docCat").value} »`:"⬆ Déposer";}
 async function uploadFiles(files){const cat=$("docCat").value;
   for(const [i,f] of files.entries()){$("upStatus").textContent=`Envoi ${i+1}/${files.length} : ${f.name}…`;
     if(f.size>50*1024*1024){$("upStatus").textContent=`✖ ${f.name} dépasse 50 Mo : dépose-le sur un Drive et ajoute le lien.`;continue}
@@ -554,8 +565,9 @@ async function renderDocs(){
   await names(list.map(d=>d.by));
   $("docList").innerHTML=list.length?list.map(d=>{const href=d.kind==="link"?safeUrl(d.url):"#";
     return `<div class="drow"><span class="dic">${icon(d)}</span><a href="${H(href)}" ${d.kind==="link"?"":`data-blob="${H(d.assetId)}"`} target="_blank" rel="noopener" class="dname">${H(d.name)}</a>
-    <span class="badge">${H(d.cat)}</span><span class="mute">${size(d.size)}</span><span class="mute">${d.at?new Date(d.at).toLocaleDateString("fr-FR"):""}${nm(d.by)?" · "+H(nm(d.by)):""}</span>
+    <select class="dcat" data-id="${d.id}">${DOC_CATS.map(c=>`<option ${c===d.cat?"selected":""}>${c}</option>`).join("")}</select><span class="mute">${size(d.size)}</span><span class="mute">${d.at?new Date(d.at).toLocaleDateString("fr-FR"):""}${nm(d.by)?" · "+H(nm(d.by)):""}</span>
     <button class="ghost del2" data-id="${d.id}">Supprimer</button></div>`}).join(""):'<div class="empty">Aucun document pour l\'instant. Dépose le premier !</div>';
+  $("docList").querySelectorAll(".dcat").forEach(s=>s.onchange=async()=>{const d=docs.find(x=>x.id===s.dataset.id);const {id,...body}=d;body.cat=s.value;try{await DB.doc("docs/"+id).set(body)}catch(e){writeErr(e)}});
   fillBlobs($("docList"));
   $("docList").querySelectorAll(".del2").forEach(b=>armDelete(b,async()=>{const d=docs.find(x=>x.id===b.dataset.id);
     try{await DB.doc("docs/"+d.id).delete();if(d.assetId&&ASSETS)ASSETS.delete(d.assetId).catch(()=>{})}catch(e){writeErr(e)}}));
