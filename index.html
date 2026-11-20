@@ -132,6 +132,16 @@
   .imgrow{display:flex;gap:10px;align-items:center}.imgrow img{height:70px;border-radius:8px}
   .pf{display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:13px;text-align:left;padding:4px 0;border-bottom:1px solid var(--line)}
   .dcat{font-size:12px;padding:3px 6px}
+  .kanban{display:grid;grid-template-columns:repeat(4,minmax(230px,1fr));gap:12px;overflow-x:auto;align-items:start}
+  .kcol{background:#0d1e2a;border:1px solid var(--line);border-radius:12px;padding:10px;min-height:220px}
+  .kcol.over{border-color:var(--acc);background:rgba(42,159,208,.08)}
+  .khead{display:flex;justify-content:space-between;font-weight:700;margin-bottom:8px;font-size:14px}
+  .kcard{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:10px;padding:10px;margin-bottom:8px;cursor:grab;display:grid;gap:6px;font-size:13px}
+  .kcard:hover{border-color:var(--acc)}
+  .kmeta{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+  .pill{font-size:11px;padding:2px 7px;border-radius:10px;background:#1d3a4e}
+  .pill.ver{background:#3b2a5c}.pill.late{background:#5c1d1d;color:#fca5a5}
+  .kact{display:flex;gap:6px}.kact button{font-size:11px;padding:3px 8px}
   .hint{font-size:12px;color:var(--mute);margin-top:8px}
 </style>
 </head>
@@ -153,6 +163,7 @@
 <nav class="tabs">
   <button data-tab="plan" class="on">📅 Planning</button>
   <button data-tab="docs">📂 Documents</button>
+  <button data-tab="tasks">✅ Tâches</button>
   <button data-tab="prod">💧 Produits</button>
   <button data-tab="team">👥 Équipe &amp; réunions</button>
   <span style="flex:1"></span><span id="whoami" class="mute" style="align-self:center"></span><button id="logout" style="align-self:center;margin-left:8px;display:none">Déconnexion</button>
@@ -197,6 +208,13 @@
     <div class="toolbar"><div id="docFilters" class="chips"></div><input id="docSearch" placeholder="🔍 Rechercher un document…"></div>
     <div id="docList"></div>
   </div>
+</main>
+
+<main class="tab" id="tab-tasks" hidden>
+  <div class="card"><div class="toolbar"><h2 class="sec" style="margin:0">✅ Tableau des tâches</h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><label class="mute">Afficher <select id="tkWho"></select></label><button class="primary" id="tkAdd">+ Nouvelle tâche</button></div></div>
+    <div class="mute">Glisse les cartes d'une colonne à l'autre (ou change la colonne dans la fiche). Une tâche avec vérificateur passe par « À vérifier » avant d'être validée.</div></div>
+  <div class="kanban" id="kanban"></div>
 </main>
 
 <main class="tab" id="tab-prod" hidden>
@@ -474,7 +492,7 @@ function banner(m){const b=$("netmsg");b.textContent=m||"";b.hidden=!m}
 function showTab(t){document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("on",x.dataset.tab===t));
   document.querySelectorAll(".tab").forEach(s=>s.hidden=s.id!=="tab-"+t);if(t==="plan")renderChart();}
 document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{showTab(b.dataset.tab);try{history.replaceState(null,"","#"+b.dataset.tab)}catch(e){}});
-if(["plan","docs","prod","team"].includes(location.hash.slice(1)))showTab(location.hash.slice(1));
+if(["plan","docs","tasks","prod","team"].includes(location.hash.slice(1)))showTab(location.hash.slice(1));
 const nameCache={};
 async function names(ids){ids=[...new Set(ids.filter(Boolean))].filter(i=>!(i in nameCache));
   if(ids.length&&USER){try{const p=await USER.profiles(ids);ids.forEach(i=>nameCache[i]=(p[i]&&p[i].name)||"")}catch(e){}}}
@@ -495,7 +513,7 @@ addEventListener("keydown",e=>{if(e.key==="Escape")closeModal()});
   if(!MEMBERS[email]){await sb.auth.signOut();loginScreen("Cette adresse ne fait pas partie du groupe.");return}
   $("whoami").textContent="Connecté : "+MEMBERS[email];$("logout").style.display="";$("logout").onclick=async()=>{await sb.auth.signOut();location.reload()};
   DB=makeDB();ASSETS=ASSETS_SB;USER=USER_SB(email);UID=email;
-  initGanttSync();initDocs();initProducts();initTeam();
+  initGanttSync();initDocs();initTasks();initProducts();initTeam();
 })();
 function initOffline(){["docList","prodGrid","meetList","teamGrid"].forEach(i=>$(i).innerHTML='<div class="empty">Disponible uniquement dans l\'espace partagé Claude.</div>');}
 
@@ -612,6 +630,70 @@ function editProduct(p){const n=!p;p=p||{status:"Idée",features:[]};let imgId=p
   $("pSave").onclick=async()=>{const body={name:$("pName").value.trim()||"Sans nom",tagline:$("pTag").value.trim(),desc:$("pDesc").value.trim(),
     features:$("pFeat").value.split("\n").map(x=>x.trim()).filter(Boolean),target:$("pTarget").value.trim(),price:$("pPrice").value.trim(),status:$("pStatus").value,imgId,at:p.at||Date.now(),by:p.by||UID};
     try{if(n)await DB.collection("products").add(body);else await DB.doc("products/"+p.id).set(body);closeModal()}catch(e){writeErr(e)}};
+}
+
+// ---------- Tâches (kanban) ----------
+const KCOLS=[["todo","À faire","#64748b"],["doing","En cours","#f59e0b"],["review","À vérifier","#a855f7"],["done","Terminé","#22c55e"]];
+const PRIO={"Basse":"#64748b","Normale":"#2a9fd0","Haute":"#ef4444"};
+let tasks=[],tkWho="Tous";
+const me=()=>MEMBERS[UID]||"";
+function flash(m){banner(m);setTimeout(()=>{if($("netmsg").textContent===m)banner("")},4500)}
+function initTasks(){
+  $("tkWho").innerHTML=["Tous","Mes tâches",...TEAM].map(x=>`<option>${x}</option>`).join("");
+  $("tkWho").onchange=e=>{tkWho=e.target.value;renderTasks()};
+  $("tkAdd").onclick=()=>editTask(null);
+  DB.collection("tasks").onSnapshot(s=>{tasks=s.docs.map(d=>({id:d.id,...d.data()}));renderTasks()},()=>{$("kanban").innerHTML='<div class="empty">Tâches inaccessibles pour le moment.</div>'});
+  renderTasks();
+}
+function saveTask(t,patch){const {id,...b}=t;Object.assign(b,patch);return DB.doc("tasks/"+id).set(b).catch(writeErr)}
+function moveTask(t,col){
+  if(col==="done"&&t.checker&&t.checker!==me()){col="review";flash("Cette tâche doit être validée par "+t.checker+" : elle passe « À vérifier ».")}
+  saveTask(t,col==="done"?{status:col,verifiedBy:me(),verifiedAt:Date.now()}:{status:col,verifiedBy:"",verifiedAt:0})}
+function renderTasks(){
+  const who=tkWho==="Mes tâches"?me():tkWho;
+  const vis=tasks.filter(t=>who==="Tous"||(t.assign||[]).includes(who)||(t.assign||[]).includes("*")||t.checker===who);
+  const today=new Date().toISOString().slice(0,10);
+  $("kanban").innerHTML=KCOLS.map(([k,l,c])=>{const ts=vis.filter(t=>(t.status||"todo")===k).sort((a,b)=>(a.due||"9").localeCompare(b.due||"9"));
+    return `<div class="kcol" data-col="${k}"><div class="khead"><span style="color:${c}">● ${l}</span><span class="mute">${ts.length}</span></div>${ts.map(t=>{
+      const a=(t.assign||[]).includes("*")?"Tout le groupe":(t.assign||[]).join(", ");
+      const late=t.due&&t.due<today&&k!=="done";
+      return `<div class="kcard" draggable="true" data-id="${t.id}" style="border-left-color:${PRIO[t.prio]||PRIO.Normale}">
+        <b>${H(t.title)}</b>${t.desc?`<div class="mute">${H(t.desc.length>90?t.desc.slice(0,90)+"…":t.desc)}</div>`:""}
+        <div class="kmeta">${a?`<span class="pill">👤 ${H(a)}</span>`:""}${t.checker?`<span class="pill ver">🔍 ${H(t.checker)}</span>`:""}${t.due?`<span class="pill ${late?"late":""}">📅 ${new Date(t.due+"T00:00:00").toLocaleDateString("fr-FR",{day:"2-digit",month:"short"})}</span>`:""}${k==="done"&&t.verifiedBy?`<span class="pill" style="background:#14532d">✔ ${H(t.verifiedBy)}</span>`:""}</div>
+        ${k==="review"?`<div class="kact"><button class="primary" data-ok="${t.id}">✔ Valider</button><button data-back="${t.id}">↩ À reprendre</button></div>`:""}
+      </div>`}).join("")||'<div class="mute" style="text-align:center;padding:16px">—</div>'}</div>`}).join("");
+  $("kanban").querySelectorAll(".kcard").forEach(c=>{
+    c.ondragstart=e=>{e.dataTransfer.setData("text/plain",c.dataset.id)};
+    c.onclick=e=>{if(e.target.closest("button"))return;editTask(tasks.find(t=>t.id===c.dataset.id))}});
+  $("kanban").querySelectorAll(".kcol").forEach(col=>{
+    col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
+    col.ondragleave=()=>col.classList.remove("over");
+    col.ondrop=e=>{e.preventDefault();col.classList.remove("over");const t=tasks.find(x=>x.id===e.dataTransfer.getData("text/plain"));if(t&&(t.status||"todo")!==col.dataset.col)moveTask(t,col.dataset.col)}});
+  $("kanban").querySelectorAll("[data-ok]").forEach(b=>b.onclick=()=>{const t=tasks.find(x=>x.id===b.dataset.ok);
+    if(t.checker&&t.checker!==me()){flash("Seul "+t.checker+" (vérificateur) peut valider cette tâche.");return}
+    saveTask(t,{status:"done",verifiedBy:me(),verifiedAt:Date.now()})});
+  $("kanban").querySelectorAll("[data-back]").forEach(b=>b.onclick=()=>{const t=tasks.find(x=>x.id===b.dataset.back);saveTask(t,{status:"doing"})});
+}
+function editTask(t){const n=!t;t=t||{status:"todo",assign:[],prio:"Normale"};let as=[...(t.assign||[])];
+  const chips=()=>TEAM.map(p=>`<span class="chip ${as.includes(p)&&!as.includes("*")?"on":""}" data-p="${p}">${p}</span>`).join("")+`<span class="chip all ${as.includes("*")?"on":""}" data-p="*">👥 Tout le groupe</span>`;
+  openModal(`<div class="mhead"><h2>${n?"Nouvelle tâche":"Tâche"}</h2><button id="mClose">✕</button></div>
+  <label class="f">Titre</label><input id="tTitle" value="${H(t.title)}" placeholder="ex : Rédiger la partie étude de marché">
+  <label class="f">Description</label><textarea id="tDesc" placeholder="Objectif, livrable attendu, ressources…">${H(t.desc)}</textarea>
+  <label class="f">Assignée à</label><div class="people" id="tAs">${chips()}</div>
+  <div class="two"><div><label class="f">Vérificateur</label><select id="tChk"><option value="">— Aucun</option>${TEAM.map(p=>`<option ${p===t.checker?"selected":""}>${p}</option>`).join("")}</select></div>
+  <div><label class="f">Échéance</label><input type="date" id="tDue" value="${H(t.due)}"></div></div>
+  <div class="two"><div><label class="f">Priorité</label><select id="tPrio">${Object.keys(PRIO).map(p=>`<option ${p===t.prio?"selected":""}>${p}</option>`).join("")}</select></div>
+  <div><label class="f">Colonne</label><select id="tStat">${KCOLS.map(([k,l])=>`<option value="${k}" ${k===(t.status||"todo")?"selected":""}>${l}</option>`).join("")}</select></div></div>
+  ${t.verifiedBy?`<div class="mute" style="margin-top:10px">✔ Validée par ${H(t.verifiedBy)}${t.verifiedAt?" le "+new Date(t.verifiedAt).toLocaleDateString("fr-FR"):""}</div>`:""}
+  <div class="mfoot">${n?"":'<button class="ghost" id="tDel">Supprimer</button>'}<span style="flex:1"></span><button id="tCancel">Annuler</button><button class="primary" id="tSave">Enregistrer</button></div>`);
+  const bind=()=>$("tAs").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{const p=c.dataset.p;if(p==="*")as=as.includes("*")?[]:["*"];else{as=as.filter(x=>x!=="*");as=as.includes(p)?as.filter(x=>x!==p):[...as,p];if(as.length===TEAM.length)as=["*"]}$("tAs").innerHTML=chips();bind()});bind();
+  $("mClose").onclick=$("tCancel").onclick=closeModal;
+  if(!n)armDelete($("tDel"),async()=>{try{await DB.doc("tasks/"+t.id).delete();closeModal()}catch(e){writeErr(e)}});
+  $("tSave").onclick=async()=>{let st=$("tStat").value;const chk=$("tChk").value;
+    if(st==="done"&&chk&&chk!==me()&&t.status!=="done"){st="review";flash("Validation requise par "+chk+" : la tâche passe « À vérifier ».")}
+    const body={title:$("tTitle").value.trim()||"Sans titre",desc:$("tDesc").value,assign:as,checker:chk,due:$("tDue").value,prio:$("tPrio").value,status:st,
+      verifiedBy:st==="done"?(t.verifiedBy||me()):"",verifiedAt:st==="done"?(t.verifiedAt||Date.now()):0,by:t.by||UID,at:t.at||Date.now()};
+    try{if(n)await DB.collection("tasks").add(body);else await DB.doc("tasks/"+t.id).set(body);closeModal()}catch(e){writeErr(e)}};
 }
 
 // ---------- Équipe & réunions ----------
